@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"strings"
 	"testing"
@@ -313,4 +314,57 @@ func TestConfig(t *testing.T) {
 
 		assert.NoError(t, exCtx.Err())
 	})
+}
+
+func TestResponseBodySizeLimit(t *testing.T) {
+	// Override the limit to 1 byte so any non-empty response body exceeds it.
+	orig := maxResponseBodySize
+	maxResponseBodySize = 1
+	t.Cleanup(func() { maxResponseBodySize = orig })
+
+	// largeBody is larger than the 1-byte limit.
+	largeBody := []byte("xx")
+
+	tests := []struct {
+		name        string
+		status      int
+		contentType string
+	}{
+		{
+			name:        "success response body too large",
+			status:      http.StatusOK,
+			contentType: "application/x-protobuf",
+		},
+		{
+			name:        "error response body too large",
+			status:      http.StatusServiceUnavailable,
+			contentType: "text/plain",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var calls int
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				calls++
+				w.Header().Set("Content-Type", tc.contentType)
+				w.WriteHeader(tc.status)
+				_, _ = w.Write(largeBody)
+			}))
+			t.Cleanup(srv.Close)
+
+			opts := []Option{
+				WithEndpoint(srv.Listener.Addr().String()),
+				WithInsecure(),
+				WithRetry(RetryConfig{Enabled: false}),
+			}
+			cfg := oconf.NewHTTPConfig(asHTTPOptions(opts)...)
+			c, err := newClient(cfg)
+			require.NoError(t, err)
+			t.Cleanup(func() { _ = c.Shutdown(t.Context()) })
+
+			err = c.UploadMetrics(t.Context(), &mpb.ResourceMetrics{})
+			assert.ErrorContains(t, err, "response body too large")
+			assert.Equal(t, 1, calls, "request must not be retried after body-too-large error")
+		})
+	}
 }
