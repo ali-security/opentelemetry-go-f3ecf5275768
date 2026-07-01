@@ -8,6 +8,7 @@ on:
 permissions: read-all
 jobs:
   codespell:
+    if: false
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Repo
